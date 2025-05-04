@@ -22,7 +22,7 @@ HF_TOKEN = {}
 # -------------------------------------------------
 
 
-# --- Helper: Hook class (copied from create_dataset.py) ---
+# --- Helper: Hook class ---
 class HookedTransformer:
     """Auxiliary class used to extract activations from transformer models."""
 

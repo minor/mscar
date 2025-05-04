@@ -1,4 +1,13 @@
-# SCAR
+## M-SCAR
+
+How to use:
+
+1. pip install poetry transformers datasets
+2. poetry install
+3. poetry add pyarrow
+4. python create_multi_concept_dataset.py
+
+<!-- # SCAR
 
 Official Implementation of the Paper [**Scar: Sparse Conditioned Autoencoders for Concept Detection and Steering in LLMs**](https://arxiv.org/abs/2411.07122).
 
@@ -61,4 +70,4 @@ Some the evaluation functions are located in `./evaluations`.
     eprint={2411.07122},
     archivePrefix={arXiv}
 }
-```
+``` -->
