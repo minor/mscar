@@ -11,12 +11,15 @@ from datasets import (
     Features,
     Sequence,
 )
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from tqdm import tqdm
 import pandas as pd
 import logging
 import os
 from typing import List, Dict, Any
+
+HF_TOKEN = {}
+# -------------------------------------------------
 
 
 # --- Helper: Hook class (copied from create_dataset.py) ---
@@ -76,6 +79,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# --- (load_shakespeare_data function remains the same) ---
 def load_shakespeare_data(base_path: str) -> DatasetDict:
     """Loads Shakespeare data from specified path."""
     ds_dict = {}
@@ -111,6 +115,7 @@ def load_shakespeare_data(base_path: str) -> DatasetDict:
     return DatasetDict(ds_dict)
 
 
+# --- (create_unified_dataset function remains the same) ---
 def create_unified_dataset(
     rtp_config: Dict,
     shakespeare_config: Dict,
@@ -121,7 +126,8 @@ def create_unified_dataset(
 
     # 1. Load RealToxicityPrompts
     logger.info("Loading RealToxicityPrompts dataset...")
-    rtp_ds = load_dataset(rtp_config["path"], split=rtp_config["split"])
+    # *** Pass token if needed for the dataset itself (usually not, but good practice) ***
+    rtp_ds = load_dataset(rtp_config["path"], split=rtp_config["split"], token=HF_TOKEN)
 
     # Preprocess RTP: Keep prompt text, extract toxicity score
     def preprocess_rtp(example):
@@ -191,7 +197,7 @@ def create_unified_dataset(
             examples["text"],
             truncation=True,
             max_length=max_seq_length,
-            padding=False,  # Pad later in dataloader if needed, or handle in extraction
+            padding="max_length",
         )
         # Add back labels - map() might drop non-standard columns
         for col in label_columns:
@@ -228,6 +234,7 @@ def create_unified_dataset(
     return final_ds_dict
 
 
+# --- (extract_token_level_data function remains the same) ---
 def extract_token_level_data(
     model: Any,
     hook: HookedTransformer,
@@ -272,26 +279,18 @@ def extract_token_level_data(
         for i in range(acts_batch.shape[0]):  # For each sequence
             # Determine actual sequence length using attention mask
             try:
-                # Ensure attention_mask[i] is 1D tensor before calling sum()
                 current_attention_mask = attention_mask[i]
                 if current_attention_mask.ndim > 1:
-                    # This case shouldn't happen if tokenization is done correctly
-                    # but handle defensively. Assuming mask is [1, seq_len] or similar.
-                    current_attention_mask = (
-                        current_attention_mask.squeeze()
-                    )  # Remove leading dims if possible
+                    current_attention_mask = current_attention_mask.squeeze()
                     if current_attention_mask.ndim != 1:
                         logger.warning(
                             f"Unexpected attention mask shape: {attention_mask[i].shape}. Estimating seq_len."
                         )
-                        # Fallback: Use the length of the activation sequence dim
                         seq_len = acts_batch.shape[1]
                     else:
                         seq_len = current_attention_mask.sum().item()
                 else:
                     seq_len = current_attention_mask.sum().item()
-
-                # Clamp seq_len to the actual dimension of acts_batch to prevent index errors
                 seq_len = min(int(seq_len), acts_batch.shape[1])
 
             except Exception as e:
@@ -308,7 +307,6 @@ def extract_token_level_data(
                 continue
 
             seq_id = seq_ids[i].item()
-            # Get the labels for this specific sequence
             sequence_labels = {col: batch_labels[col][i].item() for col in batch_labels}
 
             for j in range(seq_len):  # For each valid token in the sequence
@@ -320,7 +318,6 @@ def extract_token_level_data(
                     .half()
                     .tolist(),  # Store as list of float16
                 }
-                # Add all available labels for this token (inherited from sequence)
                 token_data.update(sequence_labels)
                 token_data_list.append(token_data)
 
@@ -331,23 +328,20 @@ def extract_token_level_data(
         )
         return []  # Return empty list
 
-    # Determine all columns dynamically from the first element
+    # Convert DataFrame back to Hugging Face Dataset
     all_columns = list(token_data_list[0].keys())
     final_df = pd.DataFrame(token_data_list, columns=all_columns)
-
-    # Convert DataFrame back to Hugging Face Dataset
-    # Ensure 'acts' is handled correctly (list of floats)
     final_hf_dataset = Dataset.from_pandas(final_df)
 
-    # Define features, especially for the 'acts' sequence
-    act_dim = len(final_hf_dataset[0]["acts"])  # Get dimension from first item
+    # Define features
+    act_dim = len(final_hf_dataset[0]["acts"])
     feature_dict = {
         "seq_id": Value("int64"),
         "token_idx": Value("int64"),
-        "acts": Sequence(Value("float16"), length=act_dim),  # Specify length and dtype
+        "acts": Sequence(Value("float16"), length=act_dim),
     }
     for col in all_columns:
-        if col not in feature_dict:  # Add label columns (assume float32)
+        if col not in feature_dict:
             feature_dict[col] = Value("float32")
 
     final_hf_dataset = final_hf_dataset.cast(Features(feature_dict))
@@ -376,10 +370,8 @@ if __name__ == "__main__":
         "path": "allenai/real-toxicity-prompts",
         "split": "train",  # Use train split for generating training data
     }
-    # IMPORTANT: Replace with the actual path to your Shakespeare data directory
     SHAKESPEARE_CONFIG = {
-        "path": "/path/to/your/Shakespearizing-Modern-English/data",  # ADJUST THIS PATH
-        # Assumes files like train.modern.nltktok, train.original.nltktok exist here
+        "path": "./Shakespearizing-Modern-English/data",
     }
 
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -388,9 +380,16 @@ if __name__ == "__main__":
     logger.info(f"Using device: {DEVICE}")
     if DEVICE == "cpu":
         logger.warning("Running on CPU, this will be very slow.")
+    if not HF_TOKEN or HF_TOKEN == "YOUR_HF_TOKEN_HERE":
+        logger.warning("HF_TOKEN is not set. Accessing gated models might fail.")
+        # Consider raising an error if the model is known to be gated:
+        if "meta-llama" in BASE_MODEL_NAME:
+            raise ValueError("HF_TOKEN must be set in the script to access Llama 3.")
 
     # --- Load Tokenizer ---
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(
+        TOKENIZER_NAME, padding_side="left", token=HF_TOKEN
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     logger.info("Tokenizer loaded.")
@@ -409,9 +408,11 @@ if __name__ == "__main__":
 
     # --- Load Model ---
     logger.info(f"Loading base model: {BASE_MODEL_NAME}")
+    # *** Use token here ***
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL_NAME,
         torch_dtype=torch.float16,  # Use float16 for efficiency
+        token=HF_TOKEN,
     ).to(DEVICE)
     model.eval()
     for param in model.parameters():
@@ -423,7 +424,6 @@ if __name__ == "__main__":
     logger.info(f"Hook registered at block {HOOK_BLOCK_NUM}, site '{HOOK_SITE}'.")
 
     # --- Extract Activations and Labels per Token ---
-    # Process train and test splits separately
     final_datasets = {}
     label_columns_to_extract = [
         "label_toxicity",
@@ -444,11 +444,15 @@ if __name__ == "__main__":
     final_dataset_dict = DatasetDict(final_datasets)
 
     # --- Save Final Dataset ---
-    if final_dataset_dict:
+    if (
+        final_dataset_dict and final_dataset_dict["train"]
+    ):  # Check if train split has data
         logger.info(f"Saving final token-level dataset to: {OUTPUT_DATASET_PATH}")
         final_dataset_dict.save_to_disk(OUTPUT_DATASET_PATH)
         logger.info("Dataset saved successfully.")
     else:
-        logger.error("No data was processed. Final dataset is empty.")
+        logger.error(
+            "No data was processed or the train split is empty. Final dataset not saved."
+        )
 
     logger.info("Script finished.")
